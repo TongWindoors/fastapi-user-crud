@@ -1,11 +1,50 @@
 from typing import List, Optional
-from fastapi import FastAPI, HTTPException
+
+from fastapi import FastAPI, HTTPException, Depends
 from pydantic import BaseModel, EmailStr
 
-app = FastAPI(title="User CRUD API", version="1.0.0")
+from sqlalchemy import Column, Integer, String, Boolean, create_engine, select
+from sqlalchemy.orm import declarative_base, sessionmaker, Session
+
+app = FastAPI(title="User CRUD API (DB Version)", version="1.0.0")
+
+# =========================
+# 数据库配置
+# =========================
+
+DATABASE_URL = "mysql+pymysql://root:123456@localhost:3306/fastapi_db"
+
+engine = create_engine(
+    DATABASE_URL,
+    echo=True,         # 调试时打印 SQL，习惯后可以改为 False
+    future=True
+)
+
+SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
+Base = declarative_base()
 
 
-# ---------- 数据模型 ----------
+# =========================
+# SQLAlchemy 模型（映射到 users 表）
+# =========================
+
+class UserORM(Base):
+    __tablename__ = "users"
+
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    username = Column(String(50), nullable=False)
+    email = Column(String(100), nullable=False, unique=True, index=True)
+    full_name = Column(String(100), nullable=True)
+    is_active = Column(Boolean, nullable=False, default=True)
+
+
+# 如果表不存在则创建（只需要在应用启动时执行一次）
+Base.metadata.create_all(bind=engine)
+
+
+# =========================
+# Pydantic 模型（和你之前一样）
+# =========================
 
 class UserBase(BaseModel):
     username: str
@@ -28,89 +67,98 @@ class UserUpdate(BaseModel):
 class User(UserBase):
     id: int
 
-
-# ---------- “内存数据库” ----------
-# 实际上就是一个 list，在程序运行期间存在，重启就没了
-
-users_db: List[User] = []
-next_user_id = 1  # 自增 id
+    class Config:
+        orm_mode = True  # 允许从 ORM 对象读取数据
 
 
-def get_next_user_id() -> int:
-    global next_user_id
-    _id = next_user_id
-    next_user_id += 1
-    return _id
+# =========================
+# 依赖：获取数据库 Session
+# =========================
+
+def get_db() -> Session:
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
 
 
-def find_user_index(user_id: int) -> int:
-    for idx, user in enumerate(users_db):
-        if user.id == user_id:
-            return idx
-    return -1
-
-
-# ---------- 路由 ----------
+# =========================
+# 路由（CRUD）—— 改成操作数据库
+# =========================
 
 @app.get("/users", response_model=List[User])
-def list_users() -> List[User]:
-    """获取所有用户列表"""
-    return users_db
+def list_users(db: Session = Depends(get_db)) -> List[User]:
+    """获取所有用户列表（从数据库）"""
+    stmt = select(UserORM)
+    result = db.execute(stmt)
+    users = result.scalars().all()
+    return users
 
 
 @app.get("/users/{user_id}", response_model=User)
-def get_user(user_id: int) -> User:
+def get_user(user_id: int, db: Session = Depends(get_db)) -> User:
     """根据 ID 获取单个用户"""
-    idx = find_user_index(user_id)
-    if idx == -1:
+    user = db.get(UserORM, user_id)
+    if not user:
         raise HTTPException(status_code=404, detail="User not found")
-    return users_db[idx]
+    return user
 
 
 @app.post("/users", response_model=User, status_code=201)
-def create_user(user_in: UserCreate) -> User:
-    """创建新用户"""
-    # 简单示例：检查 email 是否已存在
-    for u in users_db:
-        if u.email == user_in.email:
-            raise HTTPException(status_code=400, detail="Email already exists")
+def create_user(user_in: UserCreate, db: Session = Depends(get_db)) -> User:
+    """创建新用户（写入数据库）"""
 
-    user = User(
-        id=get_next_user_id(),
+    # 检查 email 是否已存在
+    stmt = select(UserORM).where(UserORM.email == user_in.email)
+    existing = db.execute(stmt).scalar_one_or_none()
+    if existing:
+        raise HTTPException(status_code=400, detail="Email already exists")
+
+    user = UserORM(
         username=user_in.username,
         email=user_in.email,
         full_name=user_in.full_name,
         is_active=user_in.is_active,
     )
-    users_db.append(user)
+    db.add(user)
+    db.commit()
+    db.refresh(user)  # 刷新以拿到自增 id
+
     return user
 
 
 @app.put("/users/{user_id}", response_model=User)
-def update_user(user_id: int, user_in: UserUpdate) -> User:
+def update_user(
+    user_id: int,
+    user_in: UserUpdate,
+    db: Session = Depends(get_db)
+) -> User:
     """更新用户信息（全量/部分更新都支持）"""
-    idx = find_user_index(user_id)
-    if idx == -1:
+
+    user = db.get(UserORM, user_id)
+    if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
-    stored_user = users_db[idx]
+    update_data = user_in.dict(exclude_unset=True)
 
-    updated_data = stored_user.dict()
-    # 只更新传入的字段
-    for key, value in user_in.dict(exclude_unset=True).items():
-        updated_data[key] = value
+    for field, value in update_data.items():
+        setattr(user, field, value)
 
-    updated_user = User(**updated_data)
-    users_db[idx] = updated_user
-    return updated_user
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    return user
 
 
 @app.delete("/users/{user_id}", status_code=204)
-def delete_user(user_id: int) -> None:
-    """删除用户"""
-    idx = find_user_index(user_id)
-    if idx == -1:
+def delete_user(user_id: int, db: Session = Depends(get_db)) -> None:
+    """删除用户（从数据库删除）"""
+
+    user = db.get(UserORM, user_id)
+    if not user:
         raise HTTPException(status_code=404, detail="User not found")
-    users_db.pop(idx)
-    # 204 没有响应
+
+    db.delete(user)
+    db.commit()
     return None
