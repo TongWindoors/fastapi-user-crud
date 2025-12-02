@@ -112,5 +112,5 @@ def delete_user(user_id: int) -> None:
     if idx == -1:
         raise HTTPException(status_code=404, detail="User not found")
     users_db.pop(idx)
-    # 204 没有响应体
+    # 204 没有响应
     return None
