@@ -11,12 +11,22 @@ from sqlalchemy.orm import declarative_base, sessionmaker, Session
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 
+from fastapi.middleware.cors import CORSMiddleware
+
 
 # =========================
 # 基本配置
 # =========================
 
 app = FastAPI(title="User API with JWT (POST only)", version="1.0.0")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],          # 开发环境直接全放行，后面可以收紧
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 SECRET_KEY = "change_this_to_a_random_long_secret_key"
 ALGORITHM = "HS256"
