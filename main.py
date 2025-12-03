@@ -22,7 +22,7 @@ SECRET_KEY = "change_this_to_a_random_long_secret_key"
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60  # token 有效期 60 分钟
 
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
 
 # OAuth2 使用的 token 提取方式（从 Authorization: Bearer xxx 里拿 token）
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
